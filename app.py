@@ -378,6 +378,17 @@ def arps_cumulative(qi, Di, b, t):
     return (qi ** b_safe / ((1 - b_safe) * Di)) * (qi ** (1 - b_safe) - qt ** (1 - b_safe))
 
 
+def trapezoid_integral(y, x):
+    """Version-safe trapezoidal integration — np.trapz was removed in
+    newer NumPy releases (renamed to np.trapezoid in 2.0), so this avoids
+    depending on either name being present."""
+    y = np.asarray(y, dtype=float)
+    x = np.asarray(x, dtype=float)
+    if len(y) < 2:
+        return 0.0
+    return float(np.sum((y[1:] + y[:-1]) / 2.0 * np.diff(x)))
+
+
 def arps_time_to_limit(qi, Di, b, q_lim):
     """Number of periods until the fitted decline reaches an economic
     limit rate. Returns None if the limit is never reached or Di is 0."""
@@ -1112,7 +1123,7 @@ with tabs[7]:
 
             # --- EUR / cumulative production ---
             t_econ = arps_time_to_limit(qi_fit, Di_fit, b_fit, econ_limit_fc)
-            cum_to_date = float(np.trapz(positive.values, t_hist)) if len(positive) > 1 else 0.0
+            cum_to_date = trapezoid_integral(positive.values, t_hist) if len(positive) > 1 else 0.0
             t_eur = t_econ if t_econ is not None else t_future[-1]
             eur = arps_cumulative(qi_fit, Di_fit, b_fit, t_eur) if Di_fit > 0 else cum_to_date
 
