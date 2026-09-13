@@ -1,5 +1,4 @@
-
-import io
+mport io
 import json
 import math
 import numpy as np
@@ -213,7 +212,7 @@ USER QUESTION:
 """
 
         response = client.chat.completions.create(
-            model="llama-3.3-70b-versatile",
+            model="openai/gpt-oss-120b",
             messages=[
                 {
                     "role": "system",
