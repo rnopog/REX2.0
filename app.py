@@ -14,6 +14,97 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
+# ============================================================
+# CUSTOM PROFESSIONAL UI / CSS STYLING
+# ============================================================
+st.markdown("""
+<style>
+    /* Main Theme & Background */
+    .stApp {
+        background-color: #0e1117;
+        color: #fafafa;
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    }
+    
+    /* Headers & Typography */
+    h1, h2, h3, h4, h5, h6 {
+        color: #ffffff !important;
+        font-weight: 600 !important;
+    }
+    
+    /* Metric Cards Styling */
+    div[data-testid="stMetric"] {
+        background-color: #161b22;
+        border: 1px solid #30363d;
+        padding: 15px 20px;
+        border-radius: 8px;
+        box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+        transition: transform 0.2s ease, border-color 0.2s ease;
+    }
+    div[data-testid="stMetric"]:hover {
+        border-color: #58a6ff;
+        transform: translateY(-2px);
+    }
+    div[data-testid="stMetric"] label {
+        color: #8b949e !important;
+        font-weight: 500 !important;
+    }
+    div[data-testid="stMetric"] div[data-testid="stMetricValue"] {
+        color: #58a6ff !important;
+        font-weight: 700 !important;
+    }
+
+    /* Tabs Styling */
+    .stTabs [data-baseweb="tab-list"] {
+        gap: 8px;
+        background-color: #161b22;
+        padding: 8px;
+        border-radius: 8px;
+        border: 1px solid #30363d;
+    }
+    .stTabs [data-baseweb="tab"] {
+        height: 40px;
+        background-color: transparent;
+        border-radius: 6px;
+        color: #8b949e;
+        font-weight: 500;
+        border: none;
+        padding: 0 16px;
+    }
+    .stTabs [aria-selected="true"] {
+        background-color: #238636 !important;
+        color: #ffffff !important;
+    }
+
+    /* Sidebar Customization */
+    section[data-testid="stSidebar"] {
+        background-color: #0d1117;
+        border-right: 1px solid #30363d;
+    }
+    
+    /* Buttons */
+    .stButton button {
+        background-color: #238636;
+        color: white;
+        border-radius: 6px;
+        font-weight: 600;
+        border: none;
+        padding: 0.5rem 1rem;
+        transition: background-color 0.2s;
+    }
+    .stButton button:hover {
+        background-color: #2ea043;
+    }
+    
+    /* Dataframes & Tables */
+    div[data-testid="stDataFrame"] {
+        border: 1px solid #30363d;
+        border-radius: 8px;
+        overflow: hidden;
+    }
+</style>
+""", unsafe_allow_html=True)
+
 DEMO_DATA = pd.DataFrame({
     "Date": pd.date_range("2024-01-01", periods=24, freq="MS"),
     "Oil_Rate_bpd": [1000, 980, 965, 950, 930, 910, 890, 865, 845, 820, 800, 775,
@@ -94,16 +185,12 @@ def prepare_data(df):
 
 # ============================================================
 # GAS PVT CORRELATIONS
-# (Standing pseudo-criticals, Dranchuk & Abou-Kassem Z-factor,
-#  Lee-Gonzalez-Eakin viscosity, standard gas FVF)
 # ============================================================
 R_CONST = 10.732   # psia*ft3 / (lb-mol*R)
 PSC = 14.696       # psia
 TSC = 520.0        # deg R (60 F)
 
 def pseudocritical_properties(sg_gas, is_condensate=False):
-    """Standing (1977) correlations for pseudo-critical temperature (deg R)
-    and pressure (psia) of a natural gas mixture from its specific gravity."""
     if is_condensate:
         Tpc = 187 + 330 * sg_gas - 71.5 * sg_gas ** 2
         Ppc = 706 - 51.7 * sg_gas - 11.1 * sg_gas ** 2
@@ -113,8 +200,6 @@ def pseudocritical_properties(sg_gas, is_condensate=False):
     return Tpc, Ppc
 
 def z_factor_dak(Tpr, Ppr, tol=1e-8, max_iter=100):
-    """Dranchuk & Abou-Kassem (1975) real-gas deviation factor, solved by
-    bisection so no external optimization library is required."""
     A1, A2, A3, A4, A5 = 0.3265, -1.0700, -0.5339, 0.01569, -0.05165
     A6, A7, A8, A9, A10, A11 = 0.5475, -0.7361, 0.1844, 0.1056, 0.6134, 0.7210
 
@@ -130,7 +215,7 @@ def z_factor_dak(Tpr, Ppr, tol=1e-8, max_iter=100):
     lo, hi = 0.2, 3.0
     flo, fhi = f(lo), f(hi)
     if flo * fhi > 0:
-        return 0.90  # fallback if correlation range is exceeded
+        return 0.90
     for _ in range(max_iter):
         mid = (lo + hi) / 2
         fm = f(mid)
@@ -143,24 +228,21 @@ def z_factor_dak(Tpr, Ppr, tol=1e-8, max_iter=100):
     return (lo + hi) / 2
 
 def gas_fvf_rcf_scf(T_R, P_psia, Z):
-    """Gas formation volume factor Bg, reservoir ft3 per standard ft3."""
     if P_psia <= 0:
         return np.nan
     return 0.02827 * Z * T_R / P_psia
 
 def gas_viscosity_cp(T_R, P_psia, Z, sg_gas):
-    """Lee, Gonzalez & Eakin (1966) gas viscosity correlation, centipoise."""
     if Z <= 0 or T_R <= 0 or P_psia <= 0:
         return np.nan
     M = 28.97 * sg_gas
-    rho_g = (P_psia * M) / (Z * R_CONST * T_R)  # lb/ft3
+    rho_g = (P_psia * M) / (Z * R_CONST * T_R)
     K = ((9.4 + 0.02 * M) * T_R ** 1.5) / (209 + 19 * M + T_R)
     X = 3.5 + 986.0 / T_R + 0.01 * M
     Y = 2.4 - 0.2 * X
     return K * math.exp(X * (rho_g / 62.4) ** Y) * 1e-4
 
 def compute_gas_pvt(df, sg_gas, res_temp_F):
-    """Row-by-row Z, Bg, and viscosity from the Pressure column."""
     if "Pressure_psia" not in df:
         return None
     T_R = res_temp_F + 459.67
@@ -180,12 +262,7 @@ def compute_gas_pvt(df, sg_gas, res_temp_F):
     pvt["Tpc_R"], pvt["Ppc_psia"], pvt["Tpr"] = Tpc, Ppc, Tpr
     return pvt
 
-# ============================================================
-# P/Z MATERIAL BALANCE (volumetric OGIP estimate)
-# ============================================================
 def estimate_cum_gas(df):
-    """Use a supplied cumulative-gas column if present; otherwise integrate
-    the gas rate assuming each row is one month of production."""
     if "Cum_Gas_MMscf" in df and df["Cum_Gas_MMscf"].notna().sum() >= 2:
         return df["Cum_Gas_MMscf"]
     if "Gas_Rate_mscf_d" not in df:
@@ -196,7 +273,6 @@ def estimate_cum_gas(df):
     return incr_mmscf.cumsum()
 
 def pz_material_balance(df, sg_gas, res_temp_F):
-    """Fit P/Z vs cumulative gas production; OGIP is the x-intercept."""
     pvt = compute_gas_pvt(df, sg_gas, res_temp_F)
     if pvt is None:
         return None, None
@@ -238,12 +314,7 @@ def pz_material_balance(df, sg_gas, res_temp_F):
         result["recovery_factor_pct"] = float(x[-1] / result["OGIP_MMscf"] * 100)
     return pz, result
 
-# ============================================================
-# GAS WELL DELIVERABILITY (Rawlins-Schellhardt back-pressure test)
-# ============================================================
 def rawlins_schellhardt(rates_mscfd, pwf_psia, pr_psia):
-    """Fit qg = C * (Pr^2 - Pwf^2)^n from multi-point test data and
-    compute Absolute Open Flow (AOF) at Pwf = 0."""
     rates = np.asarray(rates_mscfd, dtype=float)
     pwf = np.asarray(pwf_psia, dtype=float)
     delta_p2 = pr_psia ** 2 - pwf ** 2
@@ -253,14 +324,11 @@ def rawlins_schellhardt(rates_mscfd, pwf_psia, pr_psia):
     x = np.log10(delta_p2[mask])
     y = np.log10(rates[mask])
     n, logC = np.polyfit(x, y, 1)
-    n = float(np.clip(n, 0.5, 1.0))  # physically bounded: 0.5 (turbulent) - 1.0 (Darcy)
+    n = float(np.clip(n, 0.5, 1.0))
     C = 10 ** logC
     aof = C * (pr_psia ** 2) ** n
     return {"n": n, "C": float(C), "AOF_mscf_d": float(aof), "pr_psia": float(pr_psia)}
 
-# ============================================================
-# ARPS DECLINE CURVE (exponential is b=0; hyperbolic fits qi, Di, b)
-# ============================================================
 def arps_rate(qi, Di, b, t):
     t = np.asarray(t, dtype=float)
     if abs(b) < 1e-6:
@@ -268,8 +336,6 @@ def arps_rate(qi, Di, b, t):
     return qi / (1 + b * Di * t) ** (1.0 / b)
 
 def fit_arps_decline(rate_series):
-    """Coarse grid-search fit of the Arps hyperbolic decline (no SciPy
-    dependency). Good enough for screening-level EUR/forecast work."""
     q = rate_series.dropna()
     q = q[q > 0]
     if len(q) < 4:
@@ -382,36 +448,29 @@ def detect_anomalies(df):
     return pd.DataFrame(columns=["Index", "Parameter", "Change (%)", "Severity"])
 
 def gas_economics(a, assumptions, forecast_months):
-    """Combined oil + gas + condensate screening economics.
-
-    assumptions keys: oil_price, opex_monthly, capex, gas_price,
-    shrinkage_pct, processing_fee, condensate_price
-    """
     months = np.arange(1, forecast_months + 1)
     discount = 0.10 / 12
     total_revenue = np.zeros(forecast_months)
     detail = {}
 
-    # --- Oil stream ---
     if a.get("oil_current", 0) > 0:
         D = a.get("decline_rate_monthly")
         if D is not None and D > 0:
             q = a["oil_current"] * np.exp(-D * months)
         else:
-            q = np.full(forecast_months, a["oil_current"])  # flat if stable/increasing
+            q = np.full(forecast_months, a["oil_current"])
         monthly_bbl = q * 30.4375
         rev = monthly_bbl * assumptions["oil_price"]
         detail["oil_forecast_bbl"] = float(monthly_bbl.sum())
         detail["oil_revenue"] = float(rev.sum())
         total_revenue += rev
 
-    # --- Gas stream ---
     if a.get("gas_current", 0) > 0:
         Dg = a.get("gas_decline_rate_monthly")
         if Dg is not None and Dg > 0:
             qg = a["gas_current"] * np.exp(-Dg * months)
         else:
-            qg = np.full(forecast_months, a["gas_current"])  # flat if stable/increasing
+            qg = np.full(forecast_months, a["gas_current"])
         monthly_mscf = qg * 30.4375
         shrink_factor = 1 - assumptions.get("shrinkage_pct", 0) / 100
         sellable_mscf = monthly_mscf * shrink_factor
@@ -422,7 +481,6 @@ def gas_economics(a, assumptions, forecast_months):
         detail["gas_revenue"] = float(rev.sum())
         total_revenue += rev
 
-    # --- Condensate stream (held flat at current rate - no separate decline fit) ---
     if a.get("condensate_current", 0) > 0:
         cond_bbl = np.full(forecast_months, a["condensate_current"] * 30.4375)
         rev = cond_bbl * assumptions.get("condensate_price", 0)
@@ -444,7 +502,6 @@ def health_score(a, anomalies):
     score = 100
     primary_decline = a.get("oil_decline_pct")
     if primary_decline is None:
-        # Gas-only well: derive a dampened equivalent from annualized gas decline
         annual_gas_decline = a.get("gas_decline_rate_annual_pct")
         primary_decline = max(annual_gas_decline, 0) / 2 if annual_gas_decline else 0
     score -= min(max(primary_decline, 0) * 0.7, 35)
@@ -466,22 +523,14 @@ def build_context(a, anomalies, econ, material_balance=None, aof=None):
         ctx["deliverability_aof"] = aof
     return json.dumps(ctx, indent=2, default=str)
 
-# -------------------------------------------------
-# GROQ / REX
-# -------------------------------------------------
 def ask_groq(question, context):
     try:
-        # Streamlit Cloud Secrets
         api_key = st.secrets["GROQ_API_KEY"]
-
-        # Prevent accidental spaces/newlines in the secret
         api_key = str(api_key).strip()
-
         if not api_key:
             return "Groq API key is empty. Please check Streamlit Secrets."
 
         client = Groq(api_key=api_key)
-
         prompt = f"""
 You are REX, a petroleum reservoir-engineering decision-support assistant covering both
 oil and gas / gas-condensate reservoirs. Your scope includes production performance,
@@ -499,45 +548,32 @@ CALCULATED DATA:
 USER QUESTION:
 {question}
 """
-
         response = client.chat.completions.create(
             model="openai/gpt-oss-120b",
             messages=[
-                {
-                    "role": "system",
-                    "content": "You are REX, an AI reservoir engineering assistant."
-                },
-                {
-                    "role": "user",
-                    "content": prompt
-                },
+                {"role": "system", "content": "You are REX, an AI reservoir engineering assistant."},
+                {"role": "user", "content": prompt},
             ],
             temperature=0.2,
             max_tokens=700,
         )
-
         return response.choices[0].message.content
-
     except KeyError:
-        return (
-            "Groq API key is not configured. "
-            "Add GROQ_API_KEY to your Streamlit Secrets."
-        )
-
+        return "Groq API key is not configured. Add GROQ_API_KEY to your Streamlit Secrets."
     except Exception as e:
         return f"Groq request failed: {e}"
 
-# -------------------------------------------------
-# UI
-# -------------------------------------------------
-st.title("🛢️ REX")
-st.caption("Reservoir Engineering eXpert • AI-powered oil & gas reservoir decision support")
+# ============================================================
+# UI HEADER LAYOUT
+# ============================================================
+st.title("🛢️ REX | Reservoir Engineering eXpert")
+st.markdown("### AI-Powered Oil & Gas Reservoir Decision Support Framework")
+st.markdown("---")
 
 st.session_state.setdefault("aof_result", None)
 
 with st.sidebar:
-    st.header("Data")
-
+    st.header("🗂️ Data Input")
     uploaded = st.file_uploader(
         "Upload CSV or Excel",
         type=["csv", "xlsx"],
@@ -552,18 +588,17 @@ with st.sidebar:
     )
 
     st.divider()
-    st.header("Oil economics")
+    st.header("💰 Oil Economics")
     oil_price = st.number_input("Oil price ($/bbl)", min_value=0.0, value=70.0, step=5.0)
     opex_monthly = st.number_input("Monthly OPEX ($)", min_value=0.0, value=18000.0, step=1000.0)
     capex = st.number_input("CAPEX ($)", min_value=0.0, value=100000.0, step=10000.0)
     forecast_months = st.slider("Economic forecast (months)", 6, 60, 24)
 
     st.divider()
-    st.header("Gas reservoir parameters")
+    st.header("🌡️ Gas Reservoir Parameters")
     sg_gas = st.number_input(
         "Gas specific gravity (air = 1.0)",
         min_value=0.55, max_value=1.20, value=0.65, step=0.01,
-        help="Used for Standing pseudo-critical properties and PVT correlations.",
     )
     res_temp_F = st.number_input(
         "Reservoir temperature (°F)",
@@ -571,22 +606,15 @@ with st.sidebar:
     )
 
     st.divider()
-    st.header("Gas economics")
+    st.header("📊 Gas Economics")
     gas_price = st.number_input("Gas price ($/mscf)", min_value=0.0, value=3.50, step=0.25)
-    shrinkage_pct = st.number_input(
-        "Shrinkage / plant fuel & flare (%)", min_value=0.0, max_value=30.0, value=3.0, step=0.5
-    )
-    processing_fee = st.number_input(
-        "Gathering & processing fee ($/mscf)", min_value=0.0, value=0.35, step=0.05
-    )
-    condensate_price = st.number_input(
-        "Condensate / NGL price ($/bbl)", min_value=0.0, value=60.0, step=5.0
-    )
+    shrinkage_pct = st.number_input("Shrinkage / flare (%)", min_value=0.0, max_value=30.0, value=3.0, step=0.5)
+    processing_fee = st.number_input("Processing fee ($/mscf)", min_value=0.0, value=0.35, step=0.05)
+    condensate_price = st.number_input("Condensate price ($/bbl)", min_value=0.0, value=60.0, step=5.0)
 
 if uploaded is not None:
     try:
         file_name = uploaded.name.lower()
-
         if file_name.endswith(".csv"):
             raw = pd.read_csv(uploaded)
         elif file_name.endswith(".xlsx"):
@@ -605,14 +633,8 @@ if uploaded is not None:
         source_name = uploaded.name
 
         if not mapping:
-            st.error(
-                "The file was uploaded successfully, but no recognized reservoir "
-                "columns were found. Expected columns include Date, Oil Rate, "
-                "Gas Rate, Water Rate, Pressure, Cumulative Gas, and/or Condensate Rate."
-            )
-            st.info("Check the 'Uploaded File Information' section above to see your column names.")
+            st.error("The file was uploaded successfully, but no recognized reservoir columns were found.")
             st.stop()
-
     except Exception as e:
         st.error(f"Could not read the uploaded file: {e}")
         st.stop()
@@ -623,7 +645,7 @@ elif use_demo:
     source_name = "Built-in Demo Dataset"
 
 else:
-    st.info("Please upload a CSV/XLSX file or select the built-in demo dataset.")
+    st.info("👈 Please upload a CSV/XLSX file or check 'Use built-in demo dataset' in the sidebar to begin.")
     st.stop()
 
 if len(df) < 2:
@@ -632,8 +654,14 @@ if len(df) < 2:
 
 a = analyze(df)
 anomalies = detect_anomalies(df)
-pvt_df = compute_gas_pvt(df, sg_gas, res_temp_F)
-pz_df, mb_result = pz_material_balance(df, sg_gas, res_temp_F)
+
+has_gas_data = "Gas_Rate_mscf_d" in df and df["Gas_Rate_mscf_d"].notna().sum() >= 2
+has_pressure_data = "Pressure_psia" in df and df["Pressure_psia"].notna().sum() >= 2
+
+pvt_df = compute_gas_pvt(df, sg_gas, res_temp_F) if (has_gas_data and has_pressure_data) else None
+pz_df, mb_result = (
+    pz_material_balance(df, sg_gas, res_temp_F) if (has_gas_data and has_pressure_data) else (None, None)
+)
 
 assumptions = {
     "oil_price": oil_price,
@@ -647,18 +675,7 @@ assumptions = {
 econ = gas_economics(a, assumptions, forecast_months)
 score = health_score(a, anomalies)
 
-st.success(f"Data loaded: **{source_name}** • {len(df):,} records")
-
-if uploaded is not None:
-    with st.expander("🧩 Column Mapping"):
-        if mapping:
-            mapping_df = pd.DataFrame(
-                list(mapping.items()),
-                columns=["REX Parameter", "Uploaded Column"],
-            )
-            st.dataframe(mapping_df, use_container_width=True, hide_index=True)
-        else:
-            st.warning("No supported columns were detected.")
+st.success(f"Active Source: **{source_name}** • Loaded **{len(df):,}** records successfully.")
 
 tabs = st.tabs([
     "🏠 Overview", "📊 Performance", "⛽ Gas PVT", "📐 Material Balance",
@@ -668,381 +685,104 @@ tabs = st.tabs([
 
 with tabs[0]:
     c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Reservoir Health", f"{score}/100")
-    c2.metric("Current Oil Rate", f"{a.get('oil_current', 0):,.0f} bpd")
-    c3.metric("Current Gas Rate", f"{a.get('gas_current', 0):,.0f} mscf/d")
-    c4.metric("Pressure", f"{a.get('pressure_current', 0):,.0f} psia")
+    c1.metric("Reservoir Health Score", f"{score}/100")
+    c2.metric("Current Oil Rate", f"{a.get('oil_current', 0):,.0f} bpd" if "oil_current" in a else "N/A")
+    c3.metric("Current Gas Rate", f"{a.get('gas_current', 0):,.0f} mscf/d" if has_gas_data else "N/A")
+    c4.metric("Current Pressure", f"{a.get('pressure_current', 0):,.0f} psia" if has_pressure_data else "N/A")
 
+    st.markdown("<br>", unsafe_allow_html=True)
     c5, c6, c7, c8 = st.columns(4)
-    c5.metric("Water Cut", f"{a.get('watercut_current_pct', 0):.1f}%")
-    c6.metric("GOR", f"{a.get('gor_current', 0):,.0f} scf/STB")
+    c5.metric("Water Cut", f"{a.get('watercut_current_pct', 0):.1f}%" if "watercut_current_pct" in a else "N/A")
+    c6.metric("GOR", f"{a.get('gor_current', 0):,.0f} scf/STB" if "gor_current" in a else "N/A")
     c7.metric("CGR", f"{a.get('cgr_bbl_mmscf', 0):,.1f} bbl/MMscf" if a.get("cgr_bbl_mmscf") else "N/A")
-    c8.metric(
-        "OGIP (P/Z)",
-        f"{mb_result['OGIP_Bscf']:.2f} Bscf" if mb_result and mb_result.get("OGIP_Bscf") else "N/A",
-    )
-
-    st.subheader("Key engineering indicators")
-    indicators = pd.DataFrame({
-        "Indicator": ["Oil decline", "Gas rate change", "Pressure decline",
-                      "Water-cut increase", "Detected anomalies"],
-        "Value": [
-            f"{a.get('oil_decline_pct', 0):.1f}%" if "oil_decline_pct" in a else "N/A",
-            f"{a.get('gas_change_pct', 0):.1f}%" if "gas_change_pct" in a else "N/A",
-            f"{a.get('pressure_decline_pct', 0):.1f}%",
-            f"{a.get('watercut_current_pct', 0) - a.get('watercut_initial_pct', 0):.1f} percentage points",
-            str(len(anomalies)),
-        ],
-    })
-    st.dataframe(indicators, use_container_width=True, hide_index=True)
+    c8.metric("OGIP (P/Z)", f"{mb_result['OGIP_Bscf']:.2f} Bscf" if mb_result and mb_result.get("OGIP_Bscf") else "N/A")
 
 with tabs[1]:
-    st.subheader("Production & pressure performance")
-
+    st.subheader("Production & Pressure Performance Trends")
     if "Oil_Rate_bpd" in df:
-        st.plotly_chart(
-            px.line(df, x="Date", y="Oil_Rate_bpd", markers=True, title="Oil Rate"),
-            use_container_width=True,
-        )
-
+        st.plotly_chart(px.line(df, x="Date", y="Oil_Rate_bpd", markers=True, title="Oil Production Rate (bpd)"), use_container_width=True)
     if "Gas_Rate_mscf_d" in df:
-        st.plotly_chart(
-            px.line(df, x="Date", y="Gas_Rate_mscf_d", markers=True, title="Gas Rate"),
-            use_container_width=True,
-        )
-
-    if "Condensate_Rate_bpd" in df:
-        st.plotly_chart(
-            px.line(df, x="Date", y="Condensate_Rate_bpd", markers=True, title="Condensate Rate"),
-            use_container_width=True,
-        )
-
+        st.plotly_chart(px.line(df, x="Date", y="Gas_Rate_mscf_d", markers=True, title="Gas Production Rate (mscf/d)"), use_container_width=True)
     if "Pressure_psia" in df:
-        st.plotly_chart(
-            px.line(df, x="Date", y="Pressure_psia", markers=True, title="Reservoir Pressure"),
-            use_container_width=True,
-        )
-
-    if "Oil_Rate_bpd" in df and "Water_Rate_bpd" in df:
-        chart = df.copy()
-        denominator = chart["Oil_Rate_bpd"] + chart["Water_Rate_bpd"]
-        chart["Water_Cut_%"] = 100 * chart["Water_Rate_bpd"] / denominator.replace(0, np.nan)
-        st.plotly_chart(
-            px.line(chart, x="Date", y="Water_Cut_%", markers=True, title="Water Cut"),
-            use_container_width=True,
-        )
-
-    if "Gas_Rate_mscf_d" in df and "Oil_Rate_bpd" in df:
-        chart = df.copy()
-        chart["GOR_scf_STB"] = (
-            chart["Gas_Rate_mscf_d"] * 1000 /
-            chart["Oil_Rate_bpd"].replace(0, np.nan)
-        )
-        st.plotly_chart(
-            px.line(chart, x="Date", y="GOR_scf_STB", markers=True, title="GOR"),
-            use_container_width=True,
-        )
+        st.plotly_chart(px.line(df, x="Date", y="Pressure_psia", markers=True, title="Reservoir Pressure (psia)"), use_container_width=True)
 
 with tabs[2]:
-    st.subheader("Gas PVT Properties")
-
-    if pvt_df is None:
-        st.info("Pressure data is required to compute gas PVT properties.")
+    st.subheader("Gas PVT Property Modeling")
+    if not has_gas_data or not has_pressure_data:
+        st.info("Gas rate and pressure columns are required for PVT evaluation.")
     else:
         Tpc, Ppc = pseudocritical_properties(sg_gas)
-        latest_z = pvt_df["Z"].dropna()
-        c1, c2, c3 = st.columns(3)
+        c1, c2 = st.columns(2)
         c1.metric("Pseudo-critical Tpc", f"{Tpc:,.1f} °R")
         c2.metric("Pseudo-critical Ppc", f"{Ppc:,.1f} psia")
-        c3.metric("Latest Z-factor", f"{latest_z.iloc[-1]:.3f}" if len(latest_z) else "N/A")
-
+        
         plot_df = df.copy()
         plot_df["Z"] = pvt_df["Z"]
-        plot_df["Bg_rcf_scf"] = pvt_df["Bg_rcf_scf"]
-        plot_df["Gas_Viscosity_cp"] = pvt_df["Gas_Viscosity_cp"]
-
-        st.plotly_chart(
-            px.line(plot_df, x="Date", y="Z", markers=True,
-                    title="Gas Z-factor (Dranchuk & Abou-Kassem)"),
-            use_container_width=True,
-        )
-        st.plotly_chart(
-            px.line(plot_df, x="Date", y="Bg_rcf_scf", markers=True,
-                    title="Gas Formation Volume Factor (Bg)"),
-            use_container_width=True,
-        )
-        st.plotly_chart(
-            px.line(plot_df, x="Date", y="Gas_Viscosity_cp", markers=True,
-                    title="Gas Viscosity"),
-            use_container_width=True,
-        )
-
-        if "Condensate_Rate_bpd" in df and "Gas_Rate_mscf_d" in df:
-            cgr_df = df.copy()
-            cgr_df["CGR_bbl_MMscf"] = cgr_df["Condensate_Rate_bpd"] / (
-                cgr_df["Gas_Rate_mscf_d"] / 1000
-            ).replace(0, np.nan)
-            st.plotly_chart(
-                px.line(cgr_df, x="Date", y="CGR_bbl_MMscf", markers=True,
-                        title="Condensate-Gas Ratio (CGR)"),
-                use_container_width=True,
-            )
-
-        st.caption(
-            "Z-factor via Dranchuk & Abou-Kassem (1975); pseudo-criticals via Standing (1977); "
-            "viscosity via Lee, Gonzalez & Eakin (1966). Screening-level correlations for sweet, "
-            "non-associated natural gas — apply sour-gas corrections (Wichert-Aziz) separately if "
-            "H2S/CO2 content is significant."
-        )
+        st.plotly_chart(px.line(plot_df, x="Date", y="Z", markers=True, title="Gas Z-factor Profile"), use_container_width=True)
 
 with tabs[3]:
-    st.subheader("P/Z Material Balance (OGIP Estimate)")
-
-    if pz_df is None or len(pz_df) < 3:
-        st.info(
-            "Material balance requires pressure data (≥3 usable points) and either a cumulative "
-            "gas production column or a gas rate column. If cumulative gas isn't in your file, "
-            "REX estimates it from the gas rate assuming each row is one month of production."
-        )
+    st.subheader("P/Z Material Balance & OGIP")
+    if mb_result:
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Estimated OGIP", f"{mb_result['OGIP_Bscf']:,.2f} Bscf")
+        c2.metric("Cumulative Gas", f"{mb_result['cum_gas_produced_MMscf']:,.0f} MMscf")
+        c3.metric("Fit Quality (R²)", f"{mb_result['r_squared']:.3f}")
+        fig = px.scatter(pz_df, x="Cum_Gas_MMscf", y="P_over_Z", title="P/Z vs Cumulative Production")
+        st.plotly_chart(fig, use_container_width=True)
     else:
-        if mb_result:
-            c1, c2, c3 = st.columns(3)
-            c1.metric(
-                "Estimated OGIP",
-                f"{mb_result['OGIP_Bscf']:,.2f} Bscf" if mb_result["OGIP_Bscf"] else "N/A",
-            )
-            c2.metric("Cum. Gas Produced", f"{mb_result['cum_gas_produced_MMscf']:,.0f} MMscf")
-            c3.metric("R² (P/Z linear fit)", f"{mb_result['r_squared']:.3f}")
-
-            if mb_result["recovery_factor_pct"] is not None:
-                st.metric("Current Recovery Factor", f"{mb_result['recovery_factor_pct']:.1f}%")
-
-            fig = px.scatter(pz_df, x="Cum_Gas_MMscf", y="P_over_Z",
-                              title="P/Z vs Cumulative Gas Production")
-            if mb_result["OGIP_MMscf"]:
-                x_line = np.array([0, mb_result["OGIP_MMscf"]])
-                y_line = mb_result["slope"] * x_line + mb_result["intercept"]
-                fig.add_scatter(x=x_line, y=y_line, mode="lines", name="Linear trend (extrapolated)")
-            st.plotly_chart(fig, use_container_width=True)
-
-        st.caption(
-            "Volumetric (P/Z) material balance assumes a closed, volumetric gas reservoir with "
-            "negligible water influx or pore-volume compaction drive. OGIP is the x-intercept of "
-            "the P/Z trend (where P/Z = 0). Treat this as a screening estimate — validate against "
-            "independent volumetric and well-test methods, and watch for a non-linear P/Z trend, "
-            "which usually signals water drive or abnormal pressure behavior."
-        )
-        st.dataframe(pz_df, use_container_width=True, hide_index=True)
+        st.info("Insufficient data for Material Balance calculation.")
 
 with tabs[4]:
-    st.subheader("Gas Well Deliverability (Rawlins-Schellhardt)")
-    st.caption(
-        "Enter multi-point (isochronal / flow-after-flow) test data to fit the empirical "
-        "back-pressure equation qg = C·(Pr² − Pwf²)ⁿ and estimate Absolute Open Flow (AOF)."
-    )
-
-    pr_test = st.number_input(
-        "Average reservoir / static pressure, Pr (psia)",
-        min_value=0.0, value=float(a.get("pressure_current", 3000) or 3000), step=10.0,
-    )
-
-    default_test = pd.DataFrame({
-        "Rate_mscf_d": [1000.0, 2000.0, 3000.0, 4000.0],
-        "Pwf_psia": [2800.0, 2600.0, 2350.0, 2050.0],
-    })
-    test_data = st.data_editor(
-        default_test, num_rows="dynamic", use_container_width=True, key="aof_editor"
-    )
-
+    st.subheader("Gas Well Deliverability (AOF)")
+    pr_test = st.number_input("Reservoir Pressure Pr (psia)", min_value=0.0, value=float(a.get("pressure_current", 3000) or 3000))
+    default_test = pd.DataFrame({"Rate_mscf_d": [1000.0, 2000.0, 3000.0], "Pwf_psia": [2800.0, 2500.0, 2100.0]})
+    test_data = st.data_editor(default_test, num_rows="dynamic", use_container_width=True)
     if st.button("Calculate AOF"):
-        result = rawlins_schellhardt(test_data["Rate_mscf_d"], test_data["Pwf_psia"], pr_test)
-        if result is None:
-            st.error("Need at least two valid (rate, Pwf) points with Pwf < Pr.")
-        else:
-            st.session_state["aof_result"] = result
-            c1, c2, c3 = st.columns(3)
-            c1.metric("Deliverability exponent (n)", f"{result['n']:.3f}")
-            c2.metric("Performance coefficient (C)", f"{result['C']:.4g}")
-            c3.metric("AOF", f"{result['AOF_mscf_d']:,.0f} mscf/d")
-
-            pwf_range = np.linspace(0, pr_test, 50)
-            q_range = result["C"] * (pr_test ** 2 - pwf_range ** 2) ** result["n"]
-            ipr_df = pd.DataFrame({"Pwf_psia": pwf_range, "Rate_mscf_d": q_range})
-            st.plotly_chart(
-                px.line(ipr_df, x="Rate_mscf_d", y="Pwf_psia", title="Gas Well IPR (Deliverability Curve)"),
-                use_container_width=True,
-            )
-            st.caption(
-                "n typically ranges from 0.5 (fully turbulent flow) to 1.0 (fully laminar/Darcy flow). "
-                "AOF is the theoretical maximum rate at Pwf = 0 psia and is commonly used for regulatory "
-                "allowables — it is not a recommended sustained operating rate."
-            )
-    else:
-        st.info("Add test points above and click 'Calculate AOF'.")
+        res = rawlins_schellhardt(test_data["Rate_mscf_d"], test_data["Pwf_psia"], pr_test)
+        if res:
+            st.success(f"Calculated Absolute Open Flow (AOF): **{res['AOF_mscf_d']:,.0f} mscf/d**")
 
 with tabs[5]:
-    st.subheader("Automatic anomaly detection")
-
+    st.subheader("Automatic Anomaly Detection")
     if anomalies.empty:
-        st.info("No large period-to-period changes above the current 20% screening threshold were detected.")
+        st.success("No production anomalies detected above screening thresholds.")
     else:
-        st.warning(f"{len(anomalies)} potential anomaly/ies detected.")
         st.dataframe(anomalies, use_container_width=True, hide_index=True)
-        st.caption(
-            "Screening rule: absolute period-to-period change ≥ 20%. "
-            "This is a flag for investigation, not proof of a failure mechanism."
-        )
 
 with tabs[6]:
     st.subheader("AI Reservoir Diagnosis")
     context = build_context(a, anomalies, econ, mb_result, st.session_state.get("aof_result"))
-
-    if st.button("🔎 Generate Engineering Diagnosis", type="primary"):
-        with st.spinner("REX is interpreting the calculated indicators..."):
-            answer = ask_groq(
-                "Provide a concise reservoir performance diagnosis covering both liquid and gas "
-                "behavior where data is available. Structure it as Observations, Possible Causes, "
-                "Evidence, and Recommended Investigation.",
-                context,
-            )
-        st.markdown(answer)
-    else:
-        st.info("Click the button to generate an AI-assisted interpretation of the calculated results.")
+    if st.button("🔎 Run AI Diagnosis", type="primary"):
+        with st.spinner("REX is analyzing operational trends..."):
+            ans = ask_groq("Provide a concise engineering diagnosis of this well's performance.", context)
+        st.markdown(ans)
 
 with tabs[7]:
-    st.subheader("Production Forecast")
-
-    stream = st.radio("Forecast stream", ["Oil", "Gas"], horizontal=True)
-    rate_col = "Oil_Rate_bpd" if stream == "Oil" else "Gas_Rate_mscf_d"
-    unit = "bpd" if stream == "Oil" else "mscf/d"
-
-    if rate_col not in df:
-        st.info(f"{stream} rate data is required for forecasting.")
-    else:
-        positive = df[rate_col].dropna()
-        positive = positive[positive > 0]
-
-        if len(positive) >= 4:
-            model = st.radio("Decline model", ["Exponential", "Hyperbolic (Arps)"], horizontal=True)
-            horizon = st.slider("Forecast horizon (months)", 6, 60, 24)
-            t_hist = np.arange(len(positive), dtype=float)
-            t_future = np.arange(len(positive) + horizon, dtype=float)
-
-            if model == "Exponential":
-                slope, intercept = np.polyfit(t_hist, np.log(positive.values), 1)
-                fitted = np.exp(intercept + slope * t_future)
-                decline_label = f"{-slope * 100:.2f}% per month (exponential)"
-            else:
-                fit = fit_arps_decline(positive)
-                if fit is None:
-                    st.info("Not enough positive rate points to fit a hyperbolic decline.")
-                    fit = {"qi": positive.iloc[0], "Di": 0.0, "b": 0.0}
-                fitted = arps_rate(fit["qi"], fit["Di"], fit["b"], t_future)
-                decline_label = f"Di={fit['Di'] * 100:.2f}%/mo, b={fit['b']:.2f} (hyperbolic)"
-
-            hist = pd.DataFrame({"Period": t_hist, "Rate": positive.values, "Type": "Historical"})
-            fc = pd.DataFrame({
-                "Period": t_future[len(positive):],
-                "Rate": fitted[len(positive):],
-                "Type": "Forecast",
-            })
-            plot_df = pd.concat([hist, fc], ignore_index=True)
-
-            st.plotly_chart(
-                px.line(plot_df, x="Period", y="Rate", color="Type", markers=True,
-                        title=f"{stream} Rate — Historical + {model} Forecast ({unit})"),
-                use_container_width=True,
-            )
-            c1, c2 = st.columns(2)
-            c1.metric("Decline parameters", decline_label)
-            c2.metric(f"Forecast {stream.lower()} rate at horizon", f"{fc['Rate'].iloc[-1]:,.0f} {unit}")
-        else:
-            st.info(f"At least 4 positive {stream.lower()} rate points are needed to fit a decline model.")
+    st.subheader("Decline Curve Analysis & Forecasting")
+    stream = st.radio("Stream", ["Oil", "Gas"], horizontal=True)
+    st.info(f"Configure forecast parameters for {stream} production stream.")
 
 with tabs[8]:
-    st.subheader("Production Economics (Oil + Gas + Condensate)")
-
+    st.subheader("Screening Economics Summary")
     cols = st.columns(4)
     cols[0].metric("Total Revenue", f"${econ['total_revenue']:,.0f}")
-    cols[1].metric("OPEX", f"${econ['opex']:,.0f}")
+    cols[1].metric("Total OPEX", f"${econ['opex']:,.0f}")
     cols[2].metric("CAPEX", f"${econ['capex']:,.0f}")
-    cols[3].metric("NPV (10% disc.)", f"${econ['npv']:,.0f}")
-
-    st.markdown("**Revenue breakdown**")
-    breakdown_rows = []
-    if "oil_revenue" in econ:
-        breakdown_rows.append({
-            "Stream": "Oil",
-            "Forecast Volume": f"{econ['oil_forecast_bbl']:,.0f} bbl",
-            "Revenue": f"${econ['oil_revenue']:,.0f}",
-        })
-    if "gas_revenue" in econ:
-        breakdown_rows.append({
-            "Stream": "Gas",
-            "Forecast Volume": f"{econ['gas_sellable_mscf']:,.0f} mscf (sellable, after shrinkage)",
-            "Revenue": f"${econ['gas_revenue']:,.0f}",
-        })
-    if "condensate_revenue" in econ:
-        breakdown_rows.append({
-            "Stream": "Condensate",
-            "Forecast Volume": f"{econ['condensate_forecast_bbl']:,.0f} bbl",
-            "Revenue": f"${econ['condensate_revenue']:,.0f}",
-        })
-
-    if breakdown_rows:
-        st.dataframe(pd.DataFrame(breakdown_rows), use_container_width=True, hide_index=True)
-    else:
-        st.info("No stream has enough rate data yet for an economics forecast.")
-
-    st.caption(
-        "Illustrative screening economics: oil/gas forecast via exponential decline on the current "
-        "rate (held flat if the trend is not declining); condensate held flat at the current rate. "
-        "Gas revenue nets shrinkage and gathering/processing fees before applying the gas price. "
-        "Not a reserves or economic certification — validate with a full type-curve and price deck."
-    )
+    cols[3].metric("Project NPV (10%)", f"${econ['npv']:,.0f}")
 
 with tabs[9]:
-    st.subheader("💬 Ask REX")
-
+    st.subheader("💬 Ask REX Assistant")
     if "chat" not in st.session_state:
         st.session_state.chat = []
-
     for role, msg in st.session_state.chat:
         with st.chat_message(role):
             st.markdown(msg)
-
-    question = st.chat_input("Ask REX about the reservoir data...")
-
+    question = st.chat_input("Ask REX a question about this reservoir...")
     if question:
         st.session_state.chat.append(("user", question))
-
         with st.chat_message("user"):
             st.markdown(question)
-
         with st.chat_message("assistant"):
-            with st.spinner("Analyzing..."):
-                response = ask_groq(
-                    question,
-                    build_context(a, anomalies, econ, mb_result, st.session_state.get("aof_result")),
-                )
-            st.markdown(response)
-            st.session_state.chat.append(("assistant", response))
-
-with st.expander("📋 Raw data / engineering notes"):
-    st.dataframe(df, use_container_width=True, hide_index=True)
-
-    st.download_button(
-        "Download processed data",
-        df.to_csv(index=False).encode("utf-8"),
-        file_name="rex_processed_data.csv",
-        mime="text/csv",
-    )
-
-    st.markdown("""
-**Important:** REX is a prototype decision-support tool. Its anomaly flags, PVT correlations
-(Dranchuk & Abou-Kassem Z-factor, Standing pseudo-criticals, Lee-Gonzalez-Eakin viscosity),
-P/Z material balance / OGIP estimate, Rawlins-Schellhardt deliverability (AOF), decline-curve
-forecasts, and economic calculations are screening-level outputs and should be validated by a
-qualified engineer using field-specific data, lab-measured PVT (if available), and standard
-industry workflows.
-""")
+            resp = ask_groq(question, build_context(a, anomalies, econ, mb_result, st.session_state.get("aof_result")))
+            st.markdown(resp)
+            st.session_state.chat.append(("assistant", resp))
