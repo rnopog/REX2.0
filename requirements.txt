@@ -2,5 +2,6 @@ streamlit
 pandas
 numpy
 plotly
-groq
+scipy
 openpyxl
+groq
