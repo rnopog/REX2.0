@@ -4,70 +4,14 @@ import math
 import numpy as np
 import pandas as pd
 import plotly.express as px
-import plotly.graph_objects as go
-import plotly.io as pio
 import streamlit as st
-from scipy.optimize import curve_fit
-
-try:
-    from groq import Groq
-except ImportError:
-    Groq = None
+from groq import Groq
 
 st.set_page_config(
     page_title="REX | Reservoir Engineering eXpert",
     page_icon="🛢️",
     layout="wide",
     initial_sidebar_state="expanded",
-)
-
-# ============================================================
-# THEME — dark, engineering-grade look, applied to every
-# plotly-express chart in the app via the global template.
-# ============================================================
-pio.templates.default = "plotly_dark"
-px.defaults.template = "plotly_dark"
-
-st.markdown(
-    """
-    <style>
-    .stApp { background-color: #0b1220; }
-    .block-container { padding-top: 1.4rem; max-width: 1300px; }
-
-    h1, h2, h3, h4 { color: #eaf2ff !important; font-family: 'Segoe UI', sans-serif; }
-    p, li, label, .stMarkdown, .stCaption { color: #c7d3e3 !important; }
-
-    .rex-header {
-        display:flex; align-items:center; justify-content:space-between;
-        padding: 1.1rem 1.6rem; border-radius: 16px; margin-bottom: 1.2rem;
-        background: linear-gradient(120deg, #14210f 0%, #1d3320 45%, #16332f 100%);
-        border: 1px solid #2c4a2f;
-    }
-    .rex-title { font-size: 1.7rem; font-weight: 800; color: #ffffff; margin:0; letter-spacing:.3px;}
-    .rex-sub { color:#a9c7ad; font-size:.92rem; margin-top:2px;}
-    .rex-badge {
-        background: rgba(255, 176, 59, 0.14); color:#ffb03b; border:1px solid #a3711f;
-        padding: 5px 14px; border-radius: 999px; font-size:.78rem; font-weight:700;
-    }
-
-    div[data-testid="stMetric"] {
-        background: linear-gradient(160deg, #101d34, #0c1729);
-        border: 1px solid #22354f;
-        padding: 14px 16px 10px 16px;
-        border-radius: 14px;
-    }
-    div[data-testid="stMetricLabel"] { color: #8ea6c9 !important; font-weight:600; }
-    div[data-testid="stMetricValue"] { color: #ffffff !important; }
-
-    section[data-testid="stSidebar"] { background-color: #0d1626; border-right: 1px solid #1c2b45; }
-
-    .stTabs [data-baseweb="tab"] { color:#9db6d6; font-weight:600; }
-    .stTabs [aria-selected="true"] { color:#ffb03b !important; }
-
-    .rex-footer { text-align:center; color:#5c7291; font-size:.8rem; padding: 1.6rem 0 .6rem 0; }
-    </style>
-    """,
-    unsafe_allow_html=True,
 )
 
 DEMO_DATA = pd.DataFrame({
@@ -237,6 +181,135 @@ def compute_gas_pvt(df, sg_gas, res_temp_F):
     return pvt
 
 # ============================================================
+# OIL PVT CORRELATIONS
+# (Standing (1947) bubble-point/Rs/Bo, Beggs & Robinson (1975) oil
+#  viscosity, Vasquez & Beggs (1980) undersaturated compressibility &
+#  viscosity correction -- this is the standard black-oil correlation
+#  set compiled and recommended in McCain's "Properties of Petroleum
+#  Fluids" for screening-level PVT work when no lab PVT report exists.)
+# ============================================================
+def oil_specific_gravity(api):
+    """API gravity -> stock-tank oil specific gravity (water = 1.0)."""
+    return 141.5 / (131.5 + api)
+
+def standing_rs(p_psia, api, sg_gas, t_f):
+    """Standing (1947) solution GOR, scf/STB, valid at/below the
+    bubble-point pressure (saturated oil)."""
+    p_psia = max(p_psia, 0.0)
+    x = (p_psia / 18.2 + 1.4) * 10 ** (0.0125 * api - 0.00091 * t_f)
+    return sg_gas * x ** 1.2048
+
+def standing_bo(rs, api, sg_gas, t_f):
+    """Standing (1947) saturated oil formation volume factor, rb/STB."""
+    sg_oil = oil_specific_gravity(api)
+    f = rs * (sg_gas / sg_oil) ** 0.5 + 1.25 * t_f
+    return 0.9759 + 0.00012 * f ** 1.2
+
+def vasquez_beggs_co(p_psia, rsb, api, sg_gas, t_f):
+    """Vasquez & Beggs (1980) undersaturated oil isothermal
+    compressibility, 1/psi, for use above the bubble point."""
+    if p_psia <= 0:
+        return np.nan
+    return (-1433 + 5 * rsb + 17.2 * t_f - 1180 * sg_gas + 12.61 * api) / (1e5 * p_psia)
+
+def beggs_robinson_dead_oil_visc(api, t_f):
+    """Beggs & Robinson (1975) dead-oil viscosity, cp."""
+    x = 10 ** (3.0324 - 0.02023 * api) * t_f ** (-1.163)
+    return 10 ** x - 1
+
+def beggs_robinson_live_oil_visc(mu_od, rs):
+    """Beggs & Robinson (1975) saturated (live) oil viscosity, cp."""
+    a = 10.715 * (rs + 100) ** -0.515
+    b = 5.44 * (rs + 150) ** -0.338
+    return a * mu_od ** b
+
+def vasquez_beggs_visc_above_pb(mu_ob, p_psia, pb_psia):
+    """Vasquez & Beggs (1980) undersaturated oil viscosity correction
+    above the bubble point, cp."""
+    if pb_psia <= 0:
+        return mu_ob
+    m = 2.6 * p_psia ** 1.187 * math.exp(-11.513 - 8.98e-5 * p_psia)
+    return mu_ob * (p_psia / pb_psia) ** m
+
+def compute_oil_pvt(df, api, sg_gas, t_f, pb_psia):
+    """Row-by-row Rs, Bo, oil viscosity and compressibility from the
+    Pressure column, honoring the saturated/undersaturated split at
+    the user-supplied bubble-point pressure."""
+    if "Pressure_psia" not in df:
+        return None
+
+    rsb = standing_rs(pb_psia, api, sg_gas, t_f)
+    bob = standing_bo(rsb, api, sg_gas, t_f)
+    mu_od = beggs_robinson_dead_oil_visc(api, t_f)
+    mu_ob = beggs_robinson_live_oil_visc(mu_od, rsb)
+
+    rows = []
+    for _, p in df["Pressure_psia"].items():
+        if pd.isna(p) or p <= 0:
+            rows.append({"Rs_scf_stb": np.nan, "Bo_rb_stb": np.nan,
+                         "Oil_Viscosity_cp": np.nan, "co_per_psi": np.nan,
+                         "Regime": None})
+            continue
+        if p <= pb_psia:
+            rs = standing_rs(p, api, sg_gas, t_f)
+            bo = standing_bo(rs, api, sg_gas, t_f)
+            mu_o = beggs_robinson_live_oil_visc(mu_od, rs)
+            co = np.nan
+            regime = "Saturated"
+        else:
+            rs = rsb
+            co = vasquez_beggs_co(p, rsb, api, sg_gas, t_f)
+            bo = bob * math.exp(-co * (p - pb_psia))
+            mu_o = vasquez_beggs_visc_above_pb(mu_ob, p, pb_psia)
+            regime = "Undersaturated"
+        rows.append({"Rs_scf_stb": rs, "Bo_rb_stb": bo, "Oil_Viscosity_cp": mu_o,
+                     "co_per_psi": co, "Regime": regime})
+
+    pvt = pd.DataFrame(rows, index=df.index)
+    pvt["Rsb_scf_stb"], pvt["Bob_rb_stb"], pvt["Pb_psia"] = rsb, bob, pb_psia
+    pvt["Dead_Oil_Viscosity_cp"], pvt["Sg_Oil"] = mu_od, oil_specific_gravity(api)
+    return pvt
+
+# ============================================================
+# BUCKLEY-LEVERETT FRACTIONAL FLOW (Corey relative permeability)
+# ============================================================
+def corey_relperm(sw, swc, sor, krw_max, kro_max, nw, no):
+    """Corey-type normalized relative permeability curves."""
+    sw = np.asarray(sw, dtype=float)
+    denom = max(1.0 - swc - sor, 1e-9)
+    s_star = np.clip((sw - swc) / denom, 0.0, 1.0)
+    krw = krw_max * s_star ** nw
+    kro = kro_max * (1.0 - s_star) ** no
+    krw = np.where(sw <= swc, 0.0, krw)
+    kro = np.where(sw >= (1.0 - sor), 0.0, kro)
+    return krw, kro
+
+def fractional_flow_curve(swc, sor, krw_max, kro_max, nw, no, mu_w, mu_o, n_points=201):
+    """fw(Sw) for horizontal, incompressible, immiscible displacement
+    (no gravity or capillary pressure terms): fw = 1 / (1 + (kro*muw)/(krw*muo))."""
+    sw = np.linspace(swc, 1.0 - sor, n_points)
+    krw, kro = corey_relperm(sw, swc, sor, krw_max, kro_max, nw, no)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        fw = 1.0 / (1.0 + (kro * mu_w) / (krw * mu_o))
+    fw = np.nan_to_num(fw, nan=0.0, posinf=1.0, neginf=0.0)
+    fw = np.clip(fw, 0.0, 1.0)
+    return sw, fw
+
+def welge_shock_front(sw, fw, swc):
+    """Welge (1952) tangent construction from (Swc, 0): finds the shock
+    front saturation Swf and the average water saturation behind the
+    front at breakthrough, Sw_bar, by maximizing fw / (Sw - Swc)."""
+    denom = sw - swc
+    with np.errstate(divide="ignore", invalid="ignore"):
+        slope = np.where(denom > 1e-9, fw / denom, 0.0)
+    idx = int(np.argmax(slope))
+    swf = float(sw[idx])
+    fwf = float(fw[idx])
+    tangent_slope = float(slope[idx])
+    sw_bar_bt = swc + (1.0 / tangent_slope) if tangent_slope > 0 else np.nan
+    return {"Swf": swf, "fwf": fwf, "tangent_slope": tangent_slope, "Sw_bar_breakthrough": sw_bar_bt}
+
+# ============================================================
 # P/Z MATERIAL BALANCE (volumetric OGIP estimate)
 # ============================================================
 def estimate_cum_gas(df):
@@ -250,6 +323,15 @@ def estimate_cum_gas(df):
     days_per_period = 30.4375
     incr_mmscf = rate * days_per_period / 1000.0
     return incr_mmscf.cumsum()
+
+def estimate_cum_oil(df):
+    """Integrate the oil rate assuming each row represents one month of
+    production, giving cumulative oil in STB."""
+    if "Oil_Rate_bpd" not in df:
+        return None
+    rate = df["Oil_Rate_bpd"].fillna(0)
+    days_per_period = 30.4375
+    return (rate * days_per_period).cumsum()
 
 def pz_material_balance(df, sg_gas, res_temp_F):
     """Fit P/Z vs cumulative gas production; OGIP is the x-intercept."""
@@ -324,34 +406,15 @@ def arps_rate(qi, Di, b, t):
     return qi / (1 + b * Di * t) ** (1.0 / b)
 
 def fit_arps_decline(rate_series):
-    """Nonlinear least-squares fit of the Arps hyperbolic decline (SciPy
-    curve_fit), with the old coarse grid search kept only as a fallback
-    if the nonlinear solver fails to converge on messy data."""
+    """Coarse grid-search fit of the Arps hyperbolic decline (no SciPy
+    dependency). Good enough for screening-level EUR/forecast work."""
     q = rate_series.dropna()
     q = q[q > 0]
     if len(q) < 4:
         return None
     t = np.arange(len(q), dtype=float)
     qvals = q.values
-    qi0 = float(qvals[0])
-
-    try:
-        popt, _ = curve_fit(
-            lambda tt, qi, Di, b: arps_rate(qi, Di, b, tt),
-            t, qvals, p0=[qi0, 0.05, 0.5],
-            bounds=([qi0 * 0.5, 1e-6, 1e-4], [qi0 * 2.0, 2.0, 2.0]),
-            maxfev=20000,
-        )
-        qi, Di, b = popt
-        qhat = arps_rate(qi, Di, b, t)
-        sse = float(np.sum((qhat - qvals) ** 2))
-        ss_tot = float(np.sum((qvals - qvals.mean()) ** 2))
-        r2 = 1 - sse / ss_tot if ss_tot else 0.0
-        return {"qi": float(qi), "Di": float(Di), "b": float(b), "sse": sse, "r2": r2}
-    except Exception:
-        pass
-
-    # Fallback: coarse grid search (screening-level, always succeeds)
+    qi0 = qvals[0]
     best = None
     for b in np.arange(0.0, 1.01, 0.1):
         for Di in np.arange(0.005, 0.301, 0.005):
@@ -359,47 +422,7 @@ def fit_arps_decline(rate_series):
             sse = float(np.sum((qhat - qvals) ** 2))
             if best is None or sse < best["sse"]:
                 best = {"qi": float(qi0), "Di": float(Di), "b": float(b), "sse": sse}
-    if best:
-        ss_tot = float(np.sum((qvals - qvals.mean()) ** 2))
-        best["r2"] = 1 - best["sse"] / ss_tot if ss_tot else 0.0
     return best
-
-
-def arps_cumulative(qi, Di, b, t):
-    """Analytic cumulative production Np(t) under the fitted Arps curve,
-    in the same rate-units-times-period basis as t (periods, e.g. months)."""
-    t = np.asarray(t, dtype=float)
-    if abs(b) < 1e-6:
-        return (qi / Di) * (1 - np.exp(-Di * t)) if Di > 0 else qi * t
-    if abs(b - 1.0) < 1e-6:
-        return (qi / Di) * np.log(1 + Di * t) if Di > 0 else qi * t
-    b_safe = max(b, 1e-6)
-    qt = arps_rate(qi, Di, b_safe, t)
-    return (qi ** b_safe / ((1 - b_safe) * Di)) * (qi ** (1 - b_safe) - qt ** (1 - b_safe))
-
-
-def trapezoid_integral(y, x):
-    """Version-safe trapezoidal integration — np.trapz was removed in
-    newer NumPy releases (renamed to np.trapezoid in 2.0), so this avoids
-    depending on either name being present."""
-    y = np.asarray(y, dtype=float)
-    x = np.asarray(x, dtype=float)
-    if len(y) < 2:
-        return 0.0
-    return float(np.sum((y[1:] + y[:-1]) / 2.0 * np.diff(x)))
-
-
-def arps_time_to_limit(qi, Di, b, q_lim):
-    """Number of periods until the fitted decline reaches an economic
-    limit rate. Returns None if the limit is never reached or Di is 0."""
-    if q_lim <= 0 or q_lim >= qi or Di <= 0:
-        return None
-    if abs(b) < 1e-6:
-        return math.log(qi / q_lim) / Di
-    if abs(b - 1.0) < 1e-6:
-        return (qi / q_lim - 1) / Di
-    b_safe = max(b, 1e-6)
-    return ((qi / q_lim) ** b_safe - 1) / (b_safe * Di)
 
 def analyze(df):
     a = {}
@@ -569,7 +592,7 @@ def health_score(a, anomalies):
     score -= min(len(anomalies) * 5, 20)
     return max(0, min(100, round(score)))
 
-def build_context(a, anomalies, econ, material_balance=None, aof=None):
+def build_context(a, anomalies, econ, material_balance=None, aof=None, oil_pvt_summary=None, fractional_flow=None):
     ctx = {
         "metrics": a,
         "anomalies": anomalies.to_dict("records"),
@@ -579,14 +602,16 @@ def build_context(a, anomalies, econ, material_balance=None, aof=None):
         ctx["material_balance_pz"] = material_balance
     if aof:
         ctx["deliverability_aof"] = aof
+    if oil_pvt_summary:
+        ctx["oil_pvt_mccain"] = oil_pvt_summary
+    if fractional_flow:
+        ctx["fractional_flow"] = fractional_flow
     return json.dumps(ctx, indent=2, default=str)
 
 # -------------------------------------------------
 # GROQ / REX
 # -------------------------------------------------
 def ask_groq(question, context):
-    if Groq is None:
-        return "The `groq` package isn't installed in this environment. Run `pip install groq` and restart the app."
     try:
         # Streamlit Cloud Secrets
         api_key = st.secrets["GROQ_API_KEY"]
@@ -602,9 +627,12 @@ def ask_groq(question, context):
         prompt = f"""
 You are REX, a petroleum reservoir-engineering decision-support assistant covering both
 oil and gas / gas-condensate reservoirs. Your scope includes production performance,
-PVT properties (Z-factor, Bg, viscosity), P/Z volumetric material balance and OGIP,
-deliverability / Absolute Open Flow (AOF) testing, Arps decline curve analysis
-(exponential and hyperbolic), and screening-level economics.
+gas PVT properties (Z-factor, Bg, viscosity), oil PVT properties (Rs, Bo, oil viscosity,
+compressibility via the Standing / Beggs-Robinson / Vasquez-Beggs correlations compiled
+in McCain's Properties of Petroleum Fluids), Buckley-Leverett fractional flow and Welge
+shock-front analysis, P/Z volumetric material balance and OGIP, deliverability /
+Absolute Open Flow (AOF) testing, Arps decline curve analysis (exponential and
+hyperbolic), and screening-level economics.
 Use ONLY the supplied calculated data. Do not invent measurements.
 Clearly distinguish observations from possible interpretations.
 Do not claim a definitive reservoir diagnosis from production data alone.
@@ -647,18 +675,8 @@ USER QUESTION:
 # -------------------------------------------------
 # UI
 # -------------------------------------------------
-st.markdown(
-    """
-    <div class="rex-header">
-        <div>
-            <p class="rex-title">🛢️ REX</p>
-            <p class="rex-sub">Reservoir Engineering eXpert &nbsp;•&nbsp; PVT · Material Balance · Deliverability · Decline · Economics</p>
-        </div>
-        <div class="rex-badge">AI-ASSISTED</div>
-    </div>
-    """,
-    unsafe_allow_html=True,
-)
+st.title("🛢️ REX")
+st.caption("Reservoir Engineering eXpert • AI-powered oil & gas reservoir decision support")
 
 st.session_state.setdefault("aof_result", None)
 
@@ -695,6 +713,35 @@ with st.sidebar:
     res_temp_F = st.number_input(
         "Reservoir temperature (°F)",
         min_value=60.0, max_value=400.0, value=180.0, step=5.0,
+    )
+
+    st.divider()
+    st.header("Oil PVT parameters (McCain)")
+    oil_api = st.number_input(
+        "Stock-tank oil gravity (°API)",
+        min_value=5.0, max_value=70.0, value=35.0, step=1.0,
+        help="Used for Standing (Rs, Bo) and Beggs-Robinson (viscosity) black-oil correlations.",
+    )
+    pb_psia = st.number_input(
+        "Bubble-point pressure, Pb (psia)",
+        min_value=0.0, value=2500.0, step=50.0,
+        help="Pressure below which the oil is saturated (gas comes out of solution).",
+    )
+
+    st.divider()
+    st.header("Fractional flow (Buckley-Leverett)")
+    swc = st.number_input("Connate water saturation, Swc", min_value=0.0, max_value=0.6, value=0.20, step=0.01)
+    sor = st.number_input("Residual oil saturation, Sor", min_value=0.0, max_value=0.6, value=0.25, step=0.01)
+    krw_max = st.number_input("Endpoint krw @ Sor", min_value=0.01, max_value=1.0, value=0.35, step=0.01)
+    kro_max = st.number_input("Endpoint kro @ Swc", min_value=0.01, max_value=1.0, value=0.85, step=0.01)
+    nw = st.number_input("Corey water exponent, nw", min_value=1.0, max_value=6.0, value=2.5, step=0.1)
+    no = st.number_input("Corey oil exponent, no", min_value=1.0, max_value=6.0, value=2.0, step=0.1)
+    water_visc_cp = st.number_input("Water viscosity, μw (cp)", min_value=0.1, value=0.5, step=0.05)
+    oil_visc_override_cp = st.number_input(
+        "Oil viscosity for fractional flow, μo (cp)",
+        min_value=0.1, value=2.0, step=0.1,
+        help="Defaults to a manual value; if Oil PVT is available REX will offer to use the "
+             "correlation-derived value at reservoir pressure instead.",
     )
 
     st.divider()
@@ -771,6 +818,28 @@ pz_df, mb_result = (
     pz_material_balance(df, sg_gas, res_temp_F) if (has_gas_data and has_pressure_data) else (None, None)
 )
 
+has_oil_data = "Oil_Rate_bpd" in df and df["Oil_Rate_bpd"].notna().sum() >= 2
+oil_pvt_df = (
+    compute_oil_pvt(df, oil_api, sg_gas, res_temp_F, pb_psia)
+    if (has_oil_data and has_pressure_data) else None
+)
+
+oil_pvt_summary = None
+if oil_pvt_df is not None:
+    latest_visc = oil_pvt_df["Oil_Viscosity_cp"].dropna()
+    oil_pvt_summary = {
+        "Rsb_scf_stb": float(oil_pvt_df["Rsb_scf_stb"].iloc[0]),
+        "Bob_rb_stb": float(oil_pvt_df["Bob_rb_stb"].iloc[0]),
+        "Pb_psia": float(pb_psia),
+        "latest_oil_viscosity_cp": float(latest_visc.iloc[-1]) if len(latest_visc) else None,
+        "correlations": "Standing (1947) Rs/Bo; Beggs-Robinson (1975) viscosity; "
+                        "Vasquez-Beggs (1980) undersaturated co and viscosity correction",
+    }
+
+fw_sw, fw_curve = fractional_flow_curve(swc, sor, krw_max, kro_max, nw, no, water_visc_cp, oil_visc_override_cp)
+fractional_flow_summary = welge_shock_front(fw_sw, fw_curve, swc)
+fractional_flow_summary.update({"Swc": swc, "Sor": sor, "mu_w_cp": water_visc_cp, "mu_o_cp": oil_visc_override_cp})
+
 assumptions = {
     "oil_price": oil_price,
     "opex_monthly": opex_monthly,
@@ -797,7 +866,8 @@ if uploaded is not None:
             st.warning("No supported columns were detected.")
 
 tabs = st.tabs([
-    "🏠 Overview", "📊 Performance", "⛽ Gas PVT", "📐 Material Balance",
+    "🏠 Overview", "📊 Performance", "⛽ Gas PVT", "🛢️ Oil PVT (McCain)",
+    "🌊 Fractional Flow", "📐 Material Balance",
     "🎯 Deliverability", "🚨 Anomalies", "🧠 AI Diagnosis",
     "📉 Forecast", "💰 Economics", "💬 Ask REX"
 ])
@@ -879,6 +949,30 @@ with tabs[1]:
             use_container_width=True,
         )
 
+    st.subheader("Analytics")
+
+    if "Oil_Rate_bpd" in df and "Water_Rate_bpd" in df:
+        cum_oil = estimate_cum_oil(df)
+        chart = df.copy()
+        chart["Cum_Oil_STB"] = cum_oil
+        denominator = chart["Oil_Rate_bpd"] + chart["Water_Rate_bpd"]
+        chart["Water_Cut_%"] = 100 * chart["Water_Rate_bpd"] / denominator.replace(0, np.nan)
+        chart = chart.dropna(subset=["Cum_Oil_STB", "Water_Cut_%"])
+        st.plotly_chart(
+            px.line(chart, x="Cum_Oil_STB", y="Water_Cut_%", markers=True,
+                    title="Water Cut % vs Cumulative Oil Production"),
+            use_container_width=True,
+        )
+        st.caption(
+            "Cumulative oil is estimated by integrating the oil rate assuming each row is one "
+            "month of production (use a real cumulative-oil column in your file for a more "
+            "precise curve). A rising, accelerating water-cut trend against cumulative oil is a "
+            "classic signature of water breakthrough / coning — cross-check against the "
+            "Fractional Flow tab's shock-front saturation."
+        )
+    else:
+        st.info("Oil rate and water rate data are both required for the water-cut vs cumulative-oil chart.")
+
 with tabs[2]:
     st.subheader("Gas PVT Properties")
 
@@ -944,6 +1038,125 @@ with tabs[2]:
         )
 
 with tabs[3]:
+    st.subheader("Oil PVT Properties (Black-Oil Correlations)")
+
+    if not has_oil_data:
+        st.info(
+            "No oil production column was detected in this dataset (REX looks for something like "
+            "'Oil_Rate_bpd', 'Oil Rate', 'qo', etc.). Oil PVT properties only apply to a liquid "
+            "stream, so this section stays inactive until an oil rate column is present."
+        )
+    elif not has_pressure_data:
+        st.info(
+            "Oil rate data was found, but a Pressure column is also required to compute "
+            "pressure-dependent oil PVT properties (Rs, Bo, viscosity)."
+        )
+    else:
+        rsb = oil_pvt_df["Rsb_scf_stb"].iloc[0]
+        bob = oil_pvt_df["Bob_rb_stb"].iloc[0]
+        mu_od = oil_pvt_df["Dead_Oil_Viscosity_cp"].iloc[0]
+        sg_oil = oil_pvt_df["Sg_Oil"].iloc[0]
+
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Stock-tank oil SG", f"{sg_oil:.3f}")
+        c2.metric("Rs @ Pb", f"{rsb:,.0f} scf/STB")
+        c3.metric("Bo @ Pb", f"{bob:.3f} rb/STB")
+        c4.metric("Dead-oil viscosity", f"{mu_od:.2f} cp")
+
+        plot_df = df.copy()
+        plot_df["Rs_scf_stb"] = oil_pvt_df["Rs_scf_stb"]
+        plot_df["Bo_rb_stb"] = oil_pvt_df["Bo_rb_stb"]
+        plot_df["Oil_Viscosity_cp"] = oil_pvt_df["Oil_Viscosity_cp"]
+
+        st.plotly_chart(
+            px.line(plot_df, x="Date", y="Rs_scf_stb", markers=True,
+                    title="Solution GOR, Rs (Standing, 1947)"),
+            use_container_width=True,
+        )
+        st.plotly_chart(
+            px.line(plot_df, x="Date", y="Bo_rb_stb", markers=True,
+                    title="Oil Formation Volume Factor, Bo (Standing, 1947)"),
+            use_container_width=True,
+        )
+        st.plotly_chart(
+            px.line(plot_df, x="Date", y="Oil_Viscosity_cp", markers=True,
+                    title="Oil Viscosity (Beggs & Robinson, 1975)"),
+            use_container_width=True,
+        )
+
+        n_undersat = int((oil_pvt_df["Regime"] == "Undersaturated").sum())
+        n_sat = int((oil_pvt_df["Regime"] == "Saturated").sum())
+        st.caption(
+            f"Regime split across the dataset: {n_sat} saturated point(s) at/below Pb, "
+            f"{n_undersat} undersaturated point(s) above Pb ({pb_psia:,.0f} psia). "
+            "Correlations: Standing (1947) for Rs and saturated Bo, Beggs & Robinson (1975) for "
+            "dead- and live-oil viscosity, Vasquez & Beggs (1980) for undersaturated compressibility "
+            "and the viscosity correction above Pb — this is the standard black-oil correlation set "
+            "compiled and recommended in McCain's *Properties of Petroleum Fluids* for screening "
+            "PVT work when no lab report is available. Always validate against a measured PVT "
+            "report (differential liberation / CCE) before using these in a full reservoir study."
+        )
+        st.dataframe(oil_pvt_df, use_container_width=True, hide_index=True)
+
+with tabs[4]:
+    st.subheader("Buckley-Leverett Fractional Flow")
+    st.caption(
+        "Corey-type relative permeability curves feed the fractional flow equation "
+        "fw(Sw) = 1 / [1 + (kro·μw)/(krw·μo)] for a horizontal, incompressible waterflood "
+        "(no gravity or capillary-pressure terms)."
+    )
+
+    mu_o_source = oil_visc_override_cp
+    if oil_pvt_df is not None:
+        latest_mu_o = oil_pvt_df["Oil_Viscosity_cp"].dropna()
+        if len(latest_mu_o):
+            use_pvt_visc = st.checkbox(
+                f"Use correlation-derived oil viscosity at the latest reservoir pressure "
+                f"({latest_mu_o.iloc[-1]:.2f} cp) instead of the sidebar value",
+                value=True,
+            )
+            if use_pvt_visc:
+                mu_o_source = float(latest_mu_o.iloc[-1])
+
+    sw, fw = fractional_flow_curve(swc, sor, krw_max, kro_max, nw, no, water_visc_cp, mu_o_source)
+    shock = welge_shock_front(sw, fw, swc)
+
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Shock-front saturation, Swf", f"{shock['Swf']:.3f}")
+    c2.metric("fw at shock front", f"{shock['fwf']:.3f}")
+    c3.metric(
+        "Avg Sw behind front @ breakthrough",
+        f"{shock['Sw_bar_breakthrough']:.3f}" if shock["Sw_bar_breakthrough"] == shock["Sw_bar_breakthrough"] else "N/A",
+    )
+
+    krw, kro = corey_relperm(sw, swc, sor, krw_max, kro_max, nw, no)
+    relperm_df = pd.DataFrame({"Sw": sw, "krw": krw, "kro": kro})
+    fw_df = pd.DataFrame({"Sw": sw, "fw": fw})
+
+    fig_relperm = px.line(relperm_df, x="Sw", y=["krw", "kro"], title="Corey Relative Permeability")
+    st.plotly_chart(fig_relperm, use_container_width=True)
+
+    fig_fw = px.line(fw_df, x="Sw", y="fw", title="Fractional Flow Curve, fw vs Sw")
+    if shock["Sw_bar_breakthrough"] == shock["Sw_bar_breakthrough"]:
+        fig_fw.add_scatter(
+            x=[swc, shock["Sw_bar_breakthrough"]], y=[0, 1],
+            mode="lines", name="Welge tangent (shock front)",
+        )
+        fig_fw.add_scatter(
+            x=[shock["Swf"]], y=[shock["fwf"]], mode="markers",
+            marker=dict(size=10, symbol="x"), name="Swf",
+        )
+    st.plotly_chart(fig_fw, use_container_width=True)
+
+    st.caption(
+        "Welge (1952) tangent construction from (Swc, 0) locates the saturation shock front Swf "
+        "and the average water saturation behind the front at breakthrough. This is a 1-D, "
+        "displacement-only screening tool — it ignores gravity segregation, capillary pressure, "
+        "and reservoir heterogeneity, so treat results as indicative rather than a substitute for "
+        "full numerical simulation."
+    )
+
+with tabs[5]:
     st.subheader("P/Z Material Balance (OGIP Estimate)")
 
     if not has_gas_data:
@@ -988,7 +1201,7 @@ with tabs[3]:
         )
         st.dataframe(pz_df, use_container_width=True, hide_index=True)
 
-with tabs[4]:
+with tabs[6]:
     st.subheader("Gas Well Deliverability (Rawlins-Schellhardt)")
     st.caption(
         "Enter multi-point (isochronal / flow-after-flow) test data to fit the empirical "
@@ -1034,7 +1247,7 @@ with tabs[4]:
     else:
         st.info("Add test points above and click 'Calculate AOF'.")
 
-with tabs[5]:
+with tabs[7]:
     st.subheader("Automatic anomaly detection")
 
     if anomalies.empty:
@@ -1047,9 +1260,9 @@ with tabs[5]:
             "This is a flag for investigation, not proof of a failure mechanism."
         )
 
-with tabs[6]:
+with tabs[8]:
     st.subheader("AI Reservoir Diagnosis")
-    context = build_context(a, anomalies, econ, mb_result, st.session_state.get("aof_result"))
+    context = build_context(a, anomalies, econ, mb_result, st.session_state.get("aof_result"), oil_pvt_summary, fractional_flow_summary)
 
     if st.button("🔎 Generate Engineering Diagnosis", type="primary"):
         with st.spinner("REX is interpreting the calculated indicators..."):
@@ -1063,7 +1276,7 @@ with tabs[6]:
     else:
         st.info("Click the button to generate an AI-assisted interpretation of the calculated results.")
 
-with tabs[7]:
+with tabs[9]:
     st.subheader("Production Forecast")
 
     stream = st.radio("Forecast stream", ["Oil", "Gas"], horizontal=True)
@@ -1078,34 +1291,21 @@ with tabs[7]:
 
         if len(positive) >= 4:
             model = st.radio("Decline model", ["Exponential", "Hyperbolic (Arps)"], horizontal=True)
-            horizon = st.slider("Forecast horizon (months)", 6, 120, 24)
-            econ_limit_fc = st.number_input(
-                f"Economic limit ({unit})", min_value=0.0,
-                value=float(round(positive.iloc[-1] * 0.05, 1)), step=1.0,
-                help="Used to estimate EUR: cumulative volume from today until the rate decays to this limit.",
-            )
+            horizon = st.slider("Forecast horizon (months)", 6, 60, 24)
             t_hist = np.arange(len(positive), dtype=float)
             t_future = np.arange(len(positive) + horizon, dtype=float)
-            fit_r2 = None
 
             if model == "Exponential":
                 slope, intercept = np.polyfit(t_hist, np.log(positive.values), 1)
-                Di_fit, qi_fit, b_fit = -slope, float(np.exp(intercept)), 0.0
                 fitted = np.exp(intercept + slope * t_future)
                 decline_label = f"{-slope * 100:.2f}% per month (exponential)"
-                q_hat_hist = np.exp(intercept + slope * t_hist)
-                ss_res = np.sum((positive.values - q_hat_hist) ** 2)
-                ss_tot = np.sum((positive.values - positive.values.mean()) ** 2)
-                fit_r2 = 1 - ss_res / ss_tot if ss_tot else None
             else:
                 fit = fit_arps_decline(positive)
                 if fit is None:
                     st.info("Not enough positive rate points to fit a hyperbolic decline.")
-                    fit = {"qi": positive.iloc[0], "Di": 0.0, "b": 0.0, "r2": None}
-                qi_fit, Di_fit, b_fit = fit["qi"], fit["Di"], fit["b"]
-                fitted = arps_rate(qi_fit, Di_fit, b_fit, t_future)
-                decline_label = f"Di={Di_fit * 100:.2f}%/mo, b={b_fit:.2f} (hyperbolic)"
-                fit_r2 = fit.get("r2")
+                    fit = {"qi": positive.iloc[0], "Di": 0.0, "b": 0.0}
+                fitted = arps_rate(fit["qi"], fit["Di"], fit["b"], t_future)
+                decline_label = f"Di={fit['Di'] * 100:.2f}%/mo, b={fit['b']:.2f} (hyperbolic)"
 
             hist = pd.DataFrame({"Period": t_hist, "Rate": positive.values, "Type": "Historical"})
             fc = pd.DataFrame({
@@ -1120,50 +1320,13 @@ with tabs[7]:
                         title=f"{stream} Rate — Historical + {model} Forecast ({unit})"),
                 use_container_width=True,
             )
-
-            # --- EUR / cumulative production ---
-            t_econ = arps_time_to_limit(qi_fit, Di_fit, b_fit, econ_limit_fc)
-            cum_to_date = trapezoid_integral(positive.values, t_hist) if len(positive) > 1 else 0.0
-            t_eur = t_econ if t_econ is not None else t_future[-1]
-            eur = arps_cumulative(qi_fit, Di_fit, b_fit, t_eur) if Di_fit > 0 else cum_to_date
-
-            t_cum_curve = np.linspace(0, max(t_eur, t_future[-1]), 200)
-            cum_curve = arps_cumulative(qi_fit, Di_fit, b_fit, t_cum_curve) if Di_fit > 0 else t_cum_curve * qi_fit
-            fig_cum = go.Figure()
-            fig_cum.add_trace(go.Scatter(
-                x=t_cum_curve, y=cum_curve, mode="lines", name="Cumulative production",
-                line=dict(width=3, color="#ffb03b"), fill="tozeroy", fillcolor="rgba(255,176,59,0.12)",
-            ))
-            fig_cum.add_hline(y=eur, line_dash="dash", line_color="#3fe0b0",
-                               annotation_text=f"EUR ≈ {eur:,.0f} {unit.replace('/d','')}·period",
-                               annotation_font_color="#3fe0b0")
-            fig_cum.update_layout(
-                title=f"Cumulative {stream} Production Forecast to Economic Limit",
-                height=360, margin=dict(t=60, l=10, r=10, b=10),
-            )
-            st.plotly_chart(fig_cum, use_container_width=True)
-
-            c1, c2, c3, c4 = st.columns(4)
+            c1, c2 = st.columns(2)
             c1.metric("Decline parameters", decline_label)
-            c2.metric(f"Forecast rate @ {horizon}mo", f"{fc['Rate'].iloc[-1]:,.0f} {unit}")
-            c3.metric("Estimated EUR", f"{eur:,.0f}")
-            c4.metric("Fit quality (R²)", f"{fit_r2:.3f}" if fit_r2 is not None else "N/A")
-            if t_econ is not None:
-                st.caption(
-                    f"At the current decline trend, {stream.lower()} rate reaches the "
-                    f"{econ_limit_fc:.1f} {unit} economic limit in ~{t_econ:.0f} months from the last "
-                    f"historical point. EUR is the cumulative volume from time zero to that point."
-                )
-            else:
-                st.caption(
-                    "The fitted decline never reaches the economic limit within a normal horizon "
-                    "(rate is flat/increasing or the limit is set very low) — EUR shown is cumulative "
-                    "to the end of the forecast horizon instead."
-                )
+            c2.metric(f"Forecast {stream.lower()} rate at horizon", f"{fc['Rate'].iloc[-1]:,.0f} {unit}")
         else:
             st.info(f"At least 4 positive {stream.lower()} rate points are needed to fit a decline model.")
 
-with tabs[8]:
+with tabs[10]:
     st.subheader("Production Economics (Oil + Gas + Condensate)")
 
     cols = st.columns(4)
@@ -1205,7 +1368,7 @@ with tabs[8]:
         "Not a reserves or economic certification — validate with a full type-curve and price deck."
     )
 
-with tabs[9]:
+with tabs[11]:
     st.subheader("💬 Ask REX")
 
     if "chat" not in st.session_state:
@@ -1227,7 +1390,7 @@ with tabs[9]:
             with st.spinner("Analyzing..."):
                 response = ask_groq(
                     question,
-                    build_context(a, anomalies, econ, mb_result, st.session_state.get("aof_result")),
+                    build_context(a, anomalies, econ, mb_result, st.session_state.get("aof_result"), oil_pvt_summary, fractional_flow_summary),
                 )
             st.markdown(response)
             st.session_state.chat.append(("assistant", response))
@@ -1243,17 +1406,12 @@ with st.expander("📋 Raw data / engineering notes"):
     )
 
     st.markdown("""
-**Important:** REX is a prototype decision-support tool. Its anomaly flags, PVT correlations
-(Dranchuk & Abou-Kassem Z-factor, Standing pseudo-criticals, Lee-Gonzalez-Eakin viscosity),
-P/Z material balance / OGIP estimate, Rawlins-Schellhardt deliverability (AOF), decline-curve
-forecasts, and economic calculations are screening-level outputs and should be validated by a
-qualified engineer using field-specific data, lab-measured PVT (if available), and standard
-industry workflows.
+**Important:** REX is a prototype decision-support tool. Its anomaly flags, gas PVT correlations
+(Dranchuk & Abou-Kassem Z-factor, Standing pseudo-criticals, Lee-Gonzalez-Eakin viscosity), oil
+PVT correlations (Standing Rs/Bo, Beggs-Robinson viscosity, Vasquez-Beggs undersaturated
+compressibility — the black-oil correlation set compiled in McCain's *Properties of Petroleum
+Fluids*), Buckley-Leverett fractional flow / Welge shock-front analysis, P/Z material balance /
+OGIP estimate, Rawlins-Schellhardt deliverability (AOF), decline-curve forecasts, and economic
+calculations are screening-level outputs and should be validated by a qualified engineer using
+field-specific data, lab-measured PVT (if available), and standard industry workflows.
 """)
-
-st.markdown(
-    '<div class="rex-footer">REX — Arps decline (exponential/hyperbolic, nonlinear fit) · '
-    'Dranchuk-Abou-Kassem PVT · P/Z material balance · Rawlins-Schellhardt deliverability. '
-    'Screening-level engineering support, not a reserves certification.</div>',
-    unsafe_allow_html=True,
-)
